@@ -44,7 +44,7 @@ def ingest_bytes(file_bytes: bytes, filename: str, metadata: dict = {}) -> int:
     finally:
         os.unlink(tmp_path)
 
-def query_documents(question: str, k: int = 4) -> list[Document]:
+def query_documents(question: str, k: int = 8) -> list[Document]:
     retriever = get_retriever(k=k)
     docs = retriever.invoke(question)
     return docs

@@ -15,7 +15,8 @@ VECTOR_SIZE = 768
 def get_embeddings():
     return HuggingFaceEmbeddings(
         model_name=EMBEDDING_MODEL,
-        model_kwargs={"device": "cpu"}
+        model_kwargs={"device": "cpu"},
+        encode_kwargs={"batch_size":32, "normailize_embeddings": True}
     )
 
 def get_qdrant_client():

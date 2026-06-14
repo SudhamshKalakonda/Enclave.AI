@@ -1,7 +1,6 @@
 "use client";
 import { useState, useRef } from "react";
-import axios from "axios";
-
+import ReactMarkdown from 'react-markdown'
 const API = "http://localhost:8000/api/v1";
 
 type Message = {
@@ -9,6 +8,7 @@ type Message = {
   content: string;
   needs_approval?: boolean;
   compliance?: string;
+  status?: string;
 };
 
 export default function Home() {
@@ -23,22 +23,87 @@ export default function Home() {
     if (!question.trim() || loading) return;
     const userMsg: Message = { role: "user", content: question };
     setMessages(prev => [...prev, userMsg]);
+    const currentQuestion = question;
     setQuestion("");
     setLoading(true);
+
+    const assistantMsg: Message = {
+      role: "assistant",
+      content: "",
+      status: "Searching documents..."
+    };
+    setMessages(prev => [...prev, assistantMsg]);
+
     try {
-      const res = await axios.post(`${API}/query`, { question });
-      const assistantMsg: Message = {
-        role: "assistant",
-        content: res.data.answer,
-        needs_approval: res.data.needs_human_approval,
-        compliance: res.data.compliance_result,
-      };
-      setMessages(prev => [...prev, assistantMsg]);
+      const response = await fetch(`${API}/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question: currentQuestion })
+      });
+
+      const reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const text = decoder.decode(value);
+        const lines = text.split("\n").filter(l => l.startsWith("data: "));
+
+        for (const line of lines) {
+          try {
+            const data = JSON.parse(line.replace("data: ", ""));
+
+            if (data.type === "status") {
+              setMessages(prev => {
+                const updated = [...prev];
+                updated[updated.length - 1] = {
+                  ...updated[updated.length - 1],
+                  status: data.content
+                };
+                return updated;
+              });
+            }
+
+            if (data.type === "token") {
+              setMessages(prev => {
+                const updated = [...prev];
+                updated[updated.length - 1] = {
+                  ...updated[updated.length - 1],
+                  content: updated[updated.length - 1].content + data.content,
+                  status: ""
+                };
+                return updated;
+              });
+            }
+
+            if (data.type === "compliance") {
+              setMessages(prev => {
+                const updated = [...prev];
+                updated[updated.length - 1] = {
+                  ...updated[updated.length - 1],
+                  needs_approval: data.needs_approval,
+                  compliance: data.content
+                };
+                return updated;
+              });
+            }
+          } catch (e) {
+            // skip malformed chunks
+          }
+        }
+      }
     } catch (e) {
-      setMessages(prev => [...prev, {
-        role: "assistant",
-        content: "Error connecting to Enclave backend. Make sure the server is running.",
-      }]);
+      setMessages(prev => {
+        const updated = [...prev];
+        updated[updated.length - 1] = {
+          ...updated[updated.length - 1],
+          content: "Error connecting to Enclave backend.",
+          status: ""
+        };
+        return updated;
+      });
     }
     setLoading(false);
   }
@@ -51,10 +116,11 @@ export default function Home() {
     const form = new FormData();
     form.append("file", file);
     try {
-      const res = await axios.post(`${API}/upload`, form);
-      setUploadStatus(`✓ ${res.data.filename} — ${res.data.chunks_ingested} chunks ingested`);
-    } catch (e: any) {
-      setUploadStatus(`✗ ${e.response?.data?.detail || "Upload failed"}`);
+      const res = await fetch(`${API}/upload`, { method: "POST", body: form });
+      const data = await res.json();
+      setUploadStatus(`✓ ${data.filename} — ${data.chunks_ingested} chunks ingested`);
+    } catch (e) {
+      setUploadStatus("✗ Upload failed");
     }
     setUploading(false);
   }
@@ -67,11 +133,10 @@ export default function Home() {
         display: "flex", flexDirection: "column", padding: "24px 16px"
       }}>
         <div style={{ marginBottom: 32 }}>
-          <h1 style={{ fontSize: 20, fontWeight: 600, letterSpacing: "-0.5px" }}>Enclave</h1>
+          <h1 style={{ fontSize: 20, fontWeight: 600, letterSpacing: "-0.5px" }}>Enclave.AI</h1>
           <p style={{ fontSize: 12, color: "#888", marginTop: 4 }}>Privacy-first enterprise AI</p>
         </div>
 
-        {/* Upload */}
         <div style={{ marginBottom: 24 }}>
           <p style={{ fontSize: 11, fontWeight: 500, color: "#888", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.5px" }}>Documents</p>
           <button
@@ -93,7 +158,6 @@ export default function Home() {
           )}
         </div>
 
-        {/* Status */}
         <div style={{ marginTop: "auto" }}>
           <p style={{ fontSize: 11, fontWeight: 500, color: "#888", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.5px" }}>Services</p>
           {["Llama 3.1 8B", "Qdrant", "BGE Embeddings"].map(s => (
@@ -111,13 +175,11 @@ export default function Home() {
 
       {/* Main */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
-        {/* Header */}
         <div style={{ padding: "20px 32px", borderBottom: "1px solid #e8e8e4", background: "#fff" }}>
           <h2 style={{ fontSize: 15, fontWeight: 500 }}>Document Intelligence</h2>
           <p style={{ fontSize: 12, color: "#888", marginTop: 2 }}>Upload documents and ask questions — answers stay within your infrastructure</p>
         </div>
 
-        {/* Messages */}
         <div style={{ flex: 1, overflowY: "auto", padding: "24px 32px" }}>
           {messages.length === 0 && (
             <div style={{ textAlign: "center", marginTop: 80, color: "#aaa" }}>
@@ -137,30 +199,36 @@ export default function Home() {
                 border: msg.role === "assistant" ? "1px solid #e8e8e4" : "none",
                 fontSize: 14, lineHeight: 1.6
               }}>
-                <p style={{ whiteSpace: "pre-wrap" }}>{msg.content}</p>
-                {msg.needs_approval && (
-                  <div style={{ marginTop: 10, padding: "8px 10px", background: "#fff8e6", borderRadius: 6, border: "1px solid #f0d080" }}>
-                    <p style={{ fontSize: 11, color: "#b8860b", fontWeight: 500 }}>⚠ Requires human approval before action</p>
+                {msg.status && (
+                  <p style={{ fontSize: 12, color: "#999", fontStyle: "italic", marginBottom: msg.content ? 8 : 0 }}>
+                    {msg.status}
+                  </p>
+                )}
+                {msg.content && (
+                  <ReactMarkdown>{msg.content}</ReactMarkdown>
+                )}
+                {msg.compliance && (
+                  <div style={{ marginTop: 10, padding: "8px 10px", background: msg.needs_approval ? "#fff8e6" : "#f0faf4", borderRadius: 6, border: `1px solid ${msg.needs_approval ? "#f0d080" : "#c8e6d4"}` }}>
+                    <p style={{ fontSize: 11, color: msg.needs_approval ? "#b8860b" : "#2d7a4f", fontWeight: 500 }}>
+                      {msg.needs_approval ? "⚠ Requires human approval" : "✓ Compliance passed"}
+                    </p>
                   </div>
                 )}
               </div>
             </div>
           ))}
 
-          {loading && (
+          {loading && messages[messages.length - 1]?.role === "user" && (
             <div style={{ display: "flex", gap: 6, padding: "12px 16px", background: "#fff", border: "1px solid #e8e8e4", borderRadius: 16, width: "fit-content" }}>
-              {[0,1,2].map(i => (
+              {[0, 1, 2].map(i => (
                 <div key={i} style={{
                   width: 8, height: 8, borderRadius: "50%", background: "#aaa",
-                  animation: "pulse 1.2s ease-in-out infinite",
-                  animationDelay: `${i * 0.2}s`
                 }} />
               ))}
             </div>
           )}
         </div>
 
-        {/* Input */}
         <div style={{ padding: "16px 32px", borderTop: "1px solid #e8e8e4", background: "#fff" }}>
           <div style={{ display: "flex", gap: 12 }}>
             <input

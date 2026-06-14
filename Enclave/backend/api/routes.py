@@ -1,3 +1,8 @@
+from fastapi.responses import StreamingResponse
+from agents.reasoning_agent import reasoning_agent_stream
+from core.rag import query_documents, format_context
+from utils.audit_logger import log_query
+import json
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from pydantic import BaseModel
 from agents.supervisor import run_enclave
@@ -69,3 +74,56 @@ async def status():
             "agents": ["retrieval", "reasoning", "compliance"]
         }
     }
+@router.post("/stream")
+async def stream_query(request: QuestionRequest):
+    if not request.question.strip():
+        raise HTTPException(status_code=400, detail="Question cannot be empty")
+
+    async def generate():
+        question = request.question
+        
+        # Step 1 — send status
+        yield f"data: {json.dumps({'type': 'status', 'content': 'Searching documents...'})}\n\n"
+        
+        # Step 2 — retrieve documents
+        docs = query_documents(question, k=4)
+        context = format_context(docs)
+        
+        yield f"data: {json.dumps({'type': 'status', 'content': 'Analyzing your question...'})}\n\n"
+        
+        # Step 3 — stream reasoning agent tokens
+        full_answer = ""
+        async for token in reasoning_agent_stream(question, context):
+            full_answer += token
+            yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
+        
+        # Step 4 — run compliance check on full answer
+        yield f"data: {json.dumps({'type': 'status', 'content': 'Checking compliance...'})}\n\n"
+        
+        from agents.compliance_agent import compliance_agent
+        compliance_state = compliance_agent({
+            "question": question,
+            "answer": full_answer,
+            "retrieved_docs": docs,
+            "context": context,
+            "retrieval_assessment": "SUFFICIENT",
+            "compliance_result": "",
+            "needs_human_approval": False,
+            "final_response": ""
+        })
+        
+        log_query(question, full_answer, [d.metadata.get("source", "") for d in docs])
+        
+        # Step 5 — send final compliance result
+        yield f"data: {json.dumps({'type': 'compliance', 'content': compliance_state['compliance_result'], 'needs_approval': compliance_state['needs_human_approval']})}\n\n"
+        
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no"
+        }
+    )
