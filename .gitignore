@@ -1,1 +1,3 @@
 Enclave/backend/logs/
+**/__pycache__/
+**/*.pyc
